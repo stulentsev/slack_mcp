@@ -416,23 +416,32 @@ async fn main() -> Result<()> {
         }
 
         // Parse JSON-RPC request
-        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+        let request: JsonRpcRequest = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(req) => req,
             Err(e) => {
                 eprintln!("Failed to parse request: {}", e);
-                let error_response = JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: None,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32700,
-                        message: format!("Parse error: {}", e),
-                        data: None,
-                    }),
-                };
-                let response_json = serde_json::to_string(&error_response)?;
-                writeln!(stdout, "{}", response_json)?;
-                stdout.flush()?;
+                // Try to extract ID from malformed JSON for error response
+                // Cursor 2.0.69+ rejects responses with id: null, so we only respond if we can extract a valid ID
+                if let Some(extracted_id) = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").cloned())
+                    .filter(|id| !id.is_null())
+                {
+                    let error_response = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: Some(extracted_id),
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32700,
+                            message: format!("Parse error: {}", e),
+                            data: None,
+                        }),
+                    };
+                    let response_json = serde_json::to_string(&error_response)?;
+                    writeln!(stdout, "{}", response_json)?;
+                    stdout.flush()?;
+                }
+                // If we can't extract a valid ID, skip response (likely a notification or completely malformed)
                 continue;
             }
         };
@@ -440,10 +449,15 @@ async fn main() -> Result<()> {
         // Process request
         let response = process_request(request).await;
 
-        // Write response
-        let response_json = serde_json::to_string(&response)?;
-        writeln!(stdout, "{}", response_json)?;
-        stdout.flush()?;
+        // Only send response if it has a valid (non-null) ID
+        // Cursor 2.0.69+ rejects responses with id: null, and JSON-RPC 2.0 says notifications shouldn't get responses
+        if let Some(id) = &response.id {
+            if !id.is_null() {
+                let response_json = serde_json::to_string(&response)?;
+                writeln!(stdout, "{}", response_json)?;
+                stdout.flush()?;
+            }
+        }
     }
 
     Ok(())
