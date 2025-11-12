@@ -1,181 +1,243 @@
 # Slack MCP Server
 
-A lightweight Model Context Protocol (MCP) server that provides read-only access to Slack conversations. This server enables AI assistants and other MCP clients to retrieve and analyze Slack thread conversations.
+A lightweight Model Context Protocol (MCP) server that provides read-only access to Slack conversations. This server enables Cursor's AI assistant to retrieve and analyze Slack thread conversations directly from your workspace.
 
-## Features
+## What It Does
 
-- **Thread Reading**: Fetch complete thread conversations from Slack
-- **URL Parsing**: Automatically extracts channel and thread IDs from Slack URLs
-- **Text-Only Mode**: Currently retrieves text content (attachment support planned)
-- **Flexible Configuration**: Supports environment variables or config file
+The Slack MCP Server exposes a single tool called `read_thread` that allows Cursor to:
 
-## Installation
+- **Read Slack Threads**: Fetch complete thread conversations including the original message and all replies
+- **Parse Slack URLs**: Automatically extracts channel and thread IDs from Slack permalink URLs
+- **Format Conversations**: Returns thread content in a readable format with timestamps and authors
 
-### Prerequisites
+### Available Tool: `read_thread`
 
-- Rust 1.70+ (2024 edition)
-- A Slack workspace with API access
-- Slack Bot Token with appropriate permissions
+**Parameters:**
+- `url` (string, required): The full Slack thread URL
 
-### Building from Source
+**Returns:**
+- Complete thread conversation text including all replies, formatted with timestamps and author information
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/slack_mcp.git
-cd slack_mcp
-
-# Build the project
-cargo build --release
-
-# The binary will be available at target/release/slack_mcp
-```
-
-### Running
-
-```bash
-# Run directly with cargo
-cargo run
-
-# Or run the compiled binary
-./target/release/slack_mcp
-```
-
-## Configuration
-
-The server requires a Slack Bot Token to authenticate with the Slack API. You can provide this token in two ways:
-
-### Option 1: Environment Variable
-
-```bash
-export SLACK_TOKEN="xoxb-your-slack-bot-token"
-./slack_mcp
-```
-
-### Option 2: Configuration File
-
-Create a configuration file at `~/.slackmcp.config` with the following content:
-
-```
-SLACK_TOKEN=xoxb-your-slack-bot-token
-```
-
-The server will automatically load this file using dotenv.
-
-## Obtaining a Slack Token
-
-1. Go to [Slack API: Your Apps](https://api.slack.com/apps)
-2. Create a new app or select an existing one
-3. Navigate to "OAuth & Permissions"
-4. Add the following Bot Token Scopes:
-   - `channels:history` - View messages in public channels
-   - `groups:history` - View messages in private channels
-   - `im:history` - View messages in direct messages
-   - `mpim:history` - View messages in group direct messages
-5. Install the app to your workspace
-6. Copy the "Bot User OAuth Token" (starts with `xoxb-`)
-
-## Usage
-
-### Slack URL Format
-
-The server accepts Slack thread URLs in the following format:
-
-```
-https://{workspace}.slack.com/archives/{channel_id}/p{thread_ts}
-```
-
-Example:
+**Example Slack URL format:**
 ```
 https://alvys.slack.com/archives/C0982014L82/p1762872519417859
 ```
 
-Where:
-- `C0982014L82` is the channel ID
-- `p1762872519417859` is the thread timestamp (with the period removed)
+## Installation
 
-### MCP Tool: `read_thread`
+### Step 1: Install Rust Toolchain
 
-The server exposes a single tool called `read_thread` that retrieves thread conversations.
+If you don't have Rust installed, follow the instructions for your operating system:
 
-**Parameters:**
-- `url` (string, required): The Slack thread URL
+#### macOS or Linux
 
-**Returns:**
-- Thread conversation text including all replies
-
-See [AGENTS.md](AGENTS.md) for detailed usage examples with AI assistants.
-
-## Development
-
-### Project Structure
-
-```
-slack_mcp/
-├── Cargo.toml          # Rust dependencies and project metadata
-├── src/
-│   └── main.rs         # Main server implementation
-├── README.md           # This file
-└── AGENTS.md           # MCP client/agent integration guide
-```
-
-### Adding Dependencies
-
-Edit `Cargo.toml` to add required dependencies:
-
-```toml
-[dependencies]
-tokio = { version = "1.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json"] }
-dotenv = "0.15"
-```
-
-### Running Tests
+Run this command in your terminal:
 
 ```bash
-cargo test
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Code Formatting
+Follow the prompts (press Enter to accept defaults). After installation, restart your terminal or run:
 
 ```bash
-cargo fmt
+source $HOME/.cargo/env
 ```
 
-### Linting
+Verify installation:
 
 ```bash
-cargo clippy
+rustc --version
+cargo --version
 ```
 
-## Roadmap
+#### Windows
 
-- [x] Basic thread reading functionality
-- [ ] Attachment download support
-- [ ] User information resolution
-- [ ] Reaction data retrieval
-- [ ] Search functionality
-- [ ] Rate limiting and caching
-- [ ] Multi-workspace support
+1. Download and run the Rust installer from: https://rustup.rs/
+2. Follow the installation wizard (accept defaults)
+3. Restart your terminal/PowerShell
+4. Verify installation:
 
-## Contributing
+```powershell
+rustc --version
+cargo --version
+```
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+**Note**: On Windows, you may need to install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) if prompted during Rust installation.
 
-## License
+### Step 2: Build the Server
 
-[MIT License](LICENSE)
+Clone the repository and build the server:
 
-## Support
+```bash
+# Clone the repository
+git clone https://github.com/stulentsev/slack_mcp
+cd slack_mcp
 
-For issues, questions, or contributions, please open an issue on the GitHub repository.
+# Install the binary to Cargo's bin directory
+cargo install --path .
+```
+
+The binary will be installed to `~/.cargo/bin/slack_mcp` (macOS/Linux) or `%USERPROFILE%\.cargo\bin\slack_mcp.exe` (Windows). This directory is automatically added to your PATH when you install Rust.
+
+### Step 3: Get Your Slack Token
+
+1. Open your company's **Keeper Vault**
+2. Search for "Slack - MCP Server (Readonly)"
+3. Copy the token (it should start with `xoxb-`)
+
+### Step 4: Create Configuration File
+
+Create a configuration file in your home directory:
+
+**macOS/Linux:**
+```bash
+# Create the config file
+cat > ~/.slackmcp.config << EOF
+SLACK_TOKEN=xoxb-your-token-from-keeper-vault
+EOF
+
+# Secure the file (restrict access to your user only)
+chmod 600 ~/.slackmcp.config
+```
+
+**Windows:**
+```powershell
+# Create the config file
+$token = "xoxb-your-token-from-keeper-vault"
+"SLACK_TOKEN=$token" | Out-File -FilePath $env:USERPROFILE\.slackmcp.config -Encoding utf8 -NoNewline
+```
+
+**Important**: Replace `xoxb-your-token-from-keeper-vault` with the actual token you copied from Keeper.
+
+### Step 5: Configure Cursor
+
+1. Open Cursor
+2. Open the MCP settings (usually found in Settings → Features → Model Context Protocol)
+3. Add the following configuration to your MCP servers list:
+
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "command": "/Users/YOUR_USERNAME/.cargo/bin/slack_mcp"
+    }
+  }
+}
+```
+
+**Note**: 
+- **macOS/Linux**: Replace `YOUR_USERNAME` with your actual username. You can find it by running `whoami` in Terminal. The path will be `~/.cargo/bin/slack_mcp`.
+- **Windows**: Use the Windows path format, e.g., `C:\Users\YOUR_USERNAME\.cargo\bin\slack_mcp.exe`
+
+Alternatively, if `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) is in your PATH, you can use just `slack_mcp` as the command.
+
+### Step 6: Restart Cursor
+
+Restart Cursor completely for the MCP server configuration to take effect.
+
+## Usage
+
+Once installed and configured, you can use the Slack MCP server in Cursor by asking it to read Slack threads. For example:
+
+```
+Can you read this Slack thread and summarize the key points?
+https://alvys.slack.com/archives/C0982014L82/p1762872519417859
+```
+
+Or:
+
+```
+From this thread https://alvys.slack.com/archives/C0982014L82/p1762872519417859,
+what was the final decision on the deployment schedule?
+```
+
+## Troubleshooting
+
+### "Token not found" Error
+
+**Solution**: Ensure your `~/.slackmcp.config` file exists and contains the correct token. Verify the file path and permissions:
+
+```bash
+ls -la ~/.slackmcp.config
+cat ~/.slackmcp.config
+```
+
+### "Channel not found" Error
+
+**Possible causes**:
+- The Slack bot hasn't been added to the channel
+- Invalid channel ID in the URL
+
+**Solution**: Ask your team lead to add the Slack bot to the channel using `/invite @slack-bot-name`
+
+### Binary Not Found
+
+**Solution**: Verify the binary path in your Cursor MCP configuration matches where you placed the file:
+
+**macOS/Linux:**
+```bash
+# Check if the binary exists and is executable
+ls -la ~/.cargo/bin/slack_mcp
+
+# Test running it directly
+~/.cargo/bin/slack_mcp
+```
+
+**Windows:**
+```powershell
+# Check if the binary exists
+Test-Path $env:USERPROFILE\.cargo\bin\slack_mcp.exe
+
+# Test running it directly
+& $env:USERPROFILE\.cargo\bin\slack_mcp.exe
+```
+
+If the binary doesn't exist at that path, update your Cursor MCP configuration with the correct path.
+
+### Build Errors
+
+**Solution**: If you encounter build errors:
+
+1. Ensure you have the latest Rust toolchain:
+   ```bash
+   rustup update
+   ```
+
+2. On Linux, you may need additional system dependencies:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install build-essential pkg-config libssl-dev
+   
+   # Fedora/RHEL
+   sudo dnf install gcc pkg-config openssl-devel
+   ```
+
+3. On macOS, ensure you have Xcode Command Line Tools:
+   ```bash
+   xcode-select --install
+   ```
+
+### MCP Server Not Appearing in Cursor
+
+**Solution**: 
+1. Verify your Cursor MCP configuration JSON is valid
+2. Ensure you've restarted Cursor completely (quit and reopen)
+3. Check Cursor's MCP server logs for error messages
 
 ## Security
 
-**Important**: Keep your Slack tokens secure. Never commit tokens to version control or share them publicly. The `.gitignore` file is configured to exclude `.env` and configuration files.
+**Important**: 
+- Your `~/.slackmcp.config` file contains sensitive credentials. Keep it secure and never share it.
+- The file permissions (`chmod 600`) ensure only you can read it.
+- Never commit this file to version control.
 
-## Acknowledgments
+## How It Works
 
-Built using the [Model Context Protocol](https://modelcontextprotocol.io/) specification.
+The server implements the Model Context Protocol (MCP) standard, communicating with Cursor via JSON-RPC over stdin/stdout. When Cursor needs to read a Slack thread, it sends a request to the server, which:
 
+1. Parses the Slack URL to extract channel ID and thread timestamp
+2. Authenticates with Slack API using your bot token
+3. Fetches the thread conversation
+4. Formats and returns the conversation text to Cursor
+
+The server is read-only and cannot post messages, modify content, or perform any write operations on your Slack workspace.
