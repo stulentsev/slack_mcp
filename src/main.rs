@@ -4,6 +4,7 @@ use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -59,6 +60,25 @@ struct SlackMessage {
     #[serde(default)]
     #[allow(dead_code)]
     bot_id: Option<String>,
+}
+
+/// Slack API users.info response
+#[derive(Debug, Deserialize)]
+struct UsersInfoResponse {
+    ok: bool,
+    user: Option<UserInfo>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserInfo {
+    real_name: Option<String>,
+    profile: Option<UserProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserProfile {
+    display_name: Option<String>,
 }
 
 /// Slack API conversations.replies response
@@ -204,24 +224,76 @@ fn format_timestamp(ts: &str) -> String {
     ts.to_string()
 }
 
+/// Resolve a user ID to a display name via Slack API, with caching
+async fn resolve_user_name(
+    client: &Client,
+    token: &str,
+    user_id: &str,
+    cache: &mut HashMap<String, String>,
+) -> String {
+    if let Some(name) = cache.get(user_id) {
+        return name.clone();
+    }
+
+    let url = format!("https://slack.com/api/users.info?user={}", user_id);
+    let result = async {
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await?
+            .json::<UsersInfoResponse>()
+            .await?;
+        Ok::<_, reqwest::Error>(resp)
+    }
+    .await;
+
+    let display = match result.ok() {
+        Some(resp) if resp.ok => {
+            let name = resp
+                .user
+                .and_then(|u| {
+                    let display = u.profile.and_then(|p| p.display_name).filter(|n| !n.is_empty());
+                    display.or(u.real_name)
+                })
+                .unwrap_or_else(|| user_id.to_string());
+            format!("{} (@{})", name, user_id)
+        }
+        _ => format!("@{}", user_id),
+    };
+
+    cache.insert(user_id.to_string(), display.clone());
+    display
+}
+
+/// Replace <@UXXXX> mentions in text with resolved display names
+fn resolve_mentions(text: &str, user_names: &HashMap<String, String>) -> String {
+    let mention_re = Regex::new(r"<@(U[A-Z0-9]+)>").unwrap();
+    mention_re
+        .replace_all(text, |caps: &regex::Captures| {
+            let user_id = &caps[1];
+            user_names
+                .get(user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("@{}", user_id))
+        })
+        .into_owned()
+}
+
 /// Format thread messages for output
-fn format_thread_messages(messages: Vec<SlackMessage>) -> String {
+fn format_thread_messages(messages: &[SlackMessage], user_names: &HashMap<String, String>) -> String {
     let mut output = String::new();
 
-    for (idx, msg) in messages.iter().enumerate() {
-        if idx == 0 {
-            // Parent message
-            let user = msg.user.as_deref().unwrap_or("Unknown");
-            let text = msg.text.as_deref().unwrap_or("");
-            let timestamp = format_timestamp(&msg.ts);
-            output.push_str(&format!("[{}] @{}\n{}\n\n", timestamp, user, text));
-        } else {
-            // Thread replies (indented)
-            let user = msg.user.as_deref().unwrap_or("Unknown");
-            let text = msg.text.as_deref().unwrap_or("");
-            let timestamp = format_timestamp(&msg.ts);
-            output.push_str(&format!("    [{}] @{}\n    {}\n\n", timestamp, user, text));
-        }
+    for msg in messages {
+        let user_id = msg.user.as_deref().unwrap_or("Unknown");
+        let user_display = user_names
+            .get(user_id)
+            .cloned()
+            .unwrap_or_else(|| format!("@{}", user_id));
+        let raw_text = msg.text.as_deref().unwrap_or("");
+        let text = resolve_mentions(raw_text, user_names);
+        let timestamp = format_timestamp(&msg.ts);
+        output.push_str(&format!("[{}] {}\n{}\n\n", timestamp, user_display, text));
     }
 
     output
@@ -247,8 +319,31 @@ async fn handle_read_thread(params: &Value) -> Result<String> {
         return Ok("No messages found in thread.".to_string());
     }
 
+    // Collect all user IDs: message authors + mentions in text
+    let mention_re = Regex::new(r"<@(U[A-Z0-9]+)>").unwrap();
+    let mut user_ids: Vec<String> = Vec::new();
+    for msg in &messages {
+        if let Some(user_id) = &msg.user {
+            user_ids.push(user_id.clone());
+        }
+        if let Some(text) = &msg.text {
+            for cap in mention_re.captures_iter(text) {
+                user_ids.push(cap[1].to_string());
+            }
+        }
+    }
+
+    // Resolve all unique user IDs
+    let client = Client::new();
+    let mut user_cache: HashMap<String, String> = HashMap::new();
+    for user_id in &user_ids {
+        if !user_cache.contains_key(user_id.as_str()) {
+            resolve_user_name(&client, &token, user_id, &mut user_cache).await;
+        }
+    }
+
     // Format and return
-    Ok(format_thread_messages(messages))
+    Ok(format_thread_messages(&messages, &user_cache))
 }
 
 /// Handle MCP initialize request
@@ -486,5 +581,36 @@ mod tests {
         let ts = "1234567890.123456";
         let formatted = format_timestamp(ts);
         assert!(formatted.contains("2009-02-13"));
+    }
+
+    #[test]
+    fn test_resolve_mentions() {
+        let mut names = HashMap::new();
+        names.insert("U0123ABC".to_string(), "Alice (@U0123ABC)".to_string());
+        names.insert("U9876XYZ".to_string(), "Bob (@U9876XYZ)".to_string());
+
+        // Single mention
+        assert_eq!(
+            resolve_mentions("Hey <@U0123ABC>, check this", &names),
+            "Hey Alice (@U0123ABC), check this"
+        );
+
+        // Multiple mentions
+        assert_eq!(
+            resolve_mentions("<@U0123ABC> and <@U9876XYZ> please review", &names),
+            "Alice (@U0123ABC) and Bob (@U9876XYZ) please review"
+        );
+
+        // Unknown user falls back to @ID
+        assert_eq!(
+            resolve_mentions("Ask <@UUNKNOWN1>", &names),
+            "Ask @UUNKNOWN1"
+        );
+
+        // No mentions — unchanged
+        assert_eq!(
+            resolve_mentions("plain text, no mentions", &names),
+            "plain text, no mentions"
+        );
     }
 }
