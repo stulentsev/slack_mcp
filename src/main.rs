@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
 use chrono::DateTime;
 use regex::Regex;
 use reqwest::Client;
@@ -46,6 +47,15 @@ struct ThreadUrl {
     thread_ts: String,
 }
 
+/// Slack file attachment
+#[derive(Debug, Deserialize)]
+struct SlackFile {
+    mimetype: Option<String>,
+    url_private: Option<String>,
+    name: Option<String>,
+    size: Option<u64>,
+}
+
 /// Slack API message structure
 #[derive(Debug, Deserialize)]
 struct SlackMessage {
@@ -60,6 +70,8 @@ struct SlackMessage {
     #[serde(default)]
     #[allow(dead_code)]
     bot_id: Option<String>,
+    #[serde(default)]
+    files: Vec<SlackFile>,
 }
 
 /// Slack API users.info response
@@ -280,9 +292,56 @@ fn resolve_mentions(text: &str, user_names: &HashMap<String, String>) -> String 
         .into_owned()
 }
 
+const MAX_IMAGE_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+
+/// Download a Slack file and return (base64_data, mimetype)
+async fn download_image(client: &Client, token: &str, file: &SlackFile) -> Option<(String, String)> {
+    let mimetype = file.mimetype.as_deref()?;
+    if !mimetype.starts_with("image/") {
+        return None;
+    }
+
+    if let Some(size) = file.size {
+        if size > MAX_IMAGE_SIZE {
+            eprintln!(
+                "Skipping file {:?}: size {} exceeds 5MB limit",
+                file.name, size
+            );
+            return None;
+        }
+    }
+
+    let url = file.url_private.as_deref()?;
+
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        eprintln!("Failed to download image {:?}: HTTP {}", file.name, resp.status());
+        return None;
+    }
+
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.len() as u64 > MAX_IMAGE_SIZE {
+        eprintln!("Skipping file {:?}: downloaded size exceeds 5MB limit", file.name);
+        return None;
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some((b64, mimetype.to_string()))
+}
+
 /// Format thread messages for output
-fn format_thread_messages(messages: &[SlackMessage], user_names: &HashMap<String, String>) -> String {
-    let mut output = String::new();
+fn format_thread_messages(
+    messages: &[SlackMessage],
+    user_names: &HashMap<String, String>,
+    image_data: &HashMap<String, Vec<(String, String)>>,
+) -> Vec<Value> {
+    let mut blocks: Vec<Value> = Vec::new();
 
     for msg in messages {
         let user_id = msg.user.as_deref().unwrap_or("Unknown");
@@ -293,14 +352,28 @@ fn format_thread_messages(messages: &[SlackMessage], user_names: &HashMap<String
         let raw_text = msg.text.as_deref().unwrap_or("");
         let text = resolve_mentions(raw_text, user_names);
         let timestamp = format_timestamp(&msg.ts);
-        output.push_str(&format!("[{}] {}\n{}\n\n", timestamp, user_display, text));
+
+        blocks.push(json!({
+            "type": "text",
+            "text": format!("[{}] {}\n{}\n\n", timestamp, user_display, text)
+        }));
+
+        if let Some(images) = image_data.get(&msg.ts) {
+            for (b64, mime) in images {
+                blocks.push(json!({
+                    "type": "image",
+                    "data": b64,
+                    "mimeType": mime
+                }));
+            }
+        }
     }
 
-    output
+    blocks
 }
 
 /// Handle the read_thread tool call
-async fn handle_read_thread(params: &Value) -> Result<String> {
+async fn handle_read_thread(params: &Value) -> Result<Vec<Value>> {
     let url = params
         .get("url")
         .and_then(|v| v.as_str())
@@ -316,7 +389,7 @@ async fn handle_read_thread(params: &Value) -> Result<String> {
     let messages = fetch_slack_thread(&token, &thread_url.channel_id, &thread_url.thread_ts).await?;
 
     if messages.is_empty() {
-        return Ok("No messages found in thread.".to_string());
+        return Ok(vec![json!({"type": "text", "text": "No messages found in thread."})]);
     }
 
     // Collect all user IDs: message authors + mentions in text
@@ -342,8 +415,21 @@ async fn handle_read_thread(params: &Value) -> Result<String> {
         }
     }
 
+    // Download image attachments
+    let mut image_data: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for msg in &messages {
+        for file in &msg.files {
+            if let Some((b64, mime)) = download_image(&client, &token, file).await {
+                image_data
+                    .entry(msg.ts.clone())
+                    .or_default()
+                    .push((b64, mime));
+            }
+        }
+    }
+
     // Format and return
-    Ok(format_thread_messages(&messages, &user_cache))
+    Ok(format_thread_messages(&messages, &user_cache, &image_data))
 }
 
 /// Handle MCP initialize request
@@ -442,16 +528,11 @@ async fn handle_tools_call(id: Option<Value>, params: Option<Value>) -> JsonRpcR
     let tool_params = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match handle_read_thread(&tool_params).await {
-        Ok(content) => JsonRpcResponse {
+        Ok(content_blocks) => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             id,
             result: Some(json!({
-                "content": [
-                    {
-                        "type": "text",
-                        "text": content
-                    }
-                ]
+                "content": content_blocks
             })),
             error: None,
         },
