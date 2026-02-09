@@ -134,7 +134,21 @@ struct UserCacheFile {
     entries: HashMap<String, UserCacheEntry>,
 }
 
-/// Persistent user name cache backed by ~/.slackmcp.usercache
+fn home_dir() -> String {
+    env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
+fn xdg_dir(env_key: &str, default_subdir: &str) -> PathBuf {
+    if let Ok(dir) = env::var(env_key) {
+        PathBuf::from(dir).join("slackmcp")
+    } else {
+        PathBuf::from(home_dir()).join(default_subdir).join("slackmcp")
+    }
+}
+
+/// Persistent user name cache backed by $XDG_CACHE_HOME/slackmcp/usercache
 struct UserCache {
     entries: HashMap<String, UserCacheEntry>,
     path: PathBuf,
@@ -153,10 +167,9 @@ impl UserCache {
     }
 
     fn cache_path() -> PathBuf {
-        let home = env::var("HOME")
-            .or_else(|_| env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".slackmcp.usercache")
+        let dir = xdg_dir("XDG_CACHE_HOME", ".cache");
+        let _ = fs::create_dir_all(&dir);
+        dir.join("usercache")
     }
 
     fn get(&self, user_id: &str) -> Option<&str> {
@@ -270,12 +283,9 @@ fn load_slack_token() -> Result<String> {
         return Ok(token);
     }
 
-    // Try loading from ~/.slackmcp.config
-    let home_dir = env::var("HOME")
-        .or_else(|_| env::var("USERPROFILE"))
-        .context("Cannot determine home directory")?;
-
-    let config_path = PathBuf::from(home_dir).join(".slackmcp.config");
+    // Try XDG config path: $XDG_CONFIG_HOME/slackmcp/config
+    let config_dir = xdg_dir("XDG_CONFIG_HOME", ".config");
+    let config_path = config_dir.join("config");
 
     if config_path.exists() {
         dotenv::from_path(&config_path).ok();
@@ -284,8 +294,17 @@ fn load_slack_token() -> Result<String> {
         }
     }
 
+    // Legacy fallback: ~/.slackmcp.config
+    let legacy_path = PathBuf::from(home_dir()).join(".slackmcp.config");
+    if legacy_path.exists() {
+        dotenv::from_path(&legacy_path).ok();
+        if let Ok(token) = env::var("SLACK_TOKEN") {
+            return Ok(token);
+        }
+    }
+
     Err(anyhow!(
-        "SLACK_TOKEN not found. Set it as an environment variable or in ~/.slackmcp.config"
+        "SLACK_TOKEN not found. Set it as an environment variable or in ~/.config/slackmcp/config"
     ))
 }
 
