@@ -5,7 +5,7 @@ use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -100,6 +100,7 @@ struct UserInfo {
 #[derive(Debug, Deserialize)]
 struct UserProfile {
     display_name: Option<String>,
+    title: Option<String>,
 }
 
 /// Slack API conversations.replies response
@@ -121,7 +122,8 @@ const USER_CACHE_TTL: i64 = 3 * 24 * 3600; // 3 days in seconds
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UserCacheEntry {
-    display: String,
+    display_name: String,
+    title: Option<String>,
     cached_at: i64,
 }
 
@@ -152,16 +154,17 @@ impl UserCache {
         let entry = self.entries.get(user_id)?;
         let now = chrono::Utc::now().timestamp();
         if now - entry.cached_at < USER_CACHE_TTL {
-            Some(&entry.display)
+            Some(&entry.display_name)
         } else {
             None
         }
     }
 
-    fn insert(&mut self, user_id: String, display: String) {
+    fn insert(&mut self, user_id: String, display_name: String, title: Option<String>) {
         let now = chrono::Utc::now().timestamp();
         self.entries.insert(user_id, UserCacheEntry {
-            display,
+            display_name,
+            title,
             cached_at: now,
         });
     }
@@ -182,8 +185,30 @@ impl UserCache {
     fn to_display_map(&self) -> HashMap<String, String> {
         self.entries
             .iter()
-            .map(|(k, v)| (k.clone(), v.display.clone()))
+            .map(|(k, v)| (k.clone(), v.display_name.clone()))
             .collect()
+    }
+
+    /// Build a participant legend from an ordered list of author user IDs
+    fn participant_legend(&self, author_ids: &[String]) -> String {
+        let mut seen = HashSet::new();
+        let mut lines = Vec::new();
+        for uid in author_ids {
+            if !seen.insert(uid) {
+                continue;
+            }
+            if let Some(entry) = self.entries.get(uid) {
+                let mut line = format!("- {} (@{})", entry.display_name, uid);
+                if let Some(title) = &entry.title {
+                    line.push_str(&format!(" — {}", title));
+                }
+                lines.push(line);
+            }
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        format!("Participants:\n{}\n\n---\n\n", lines.join("\n"))
     }
 }
 
@@ -339,22 +364,30 @@ async fn resolve_user_name(
     }
     .await;
 
-    let display = match result.ok() {
+    let (display_name, title) = match result.ok() {
         Some(resp) if resp.ok => {
-            let name = resp
-                .user
-                .and_then(|u| {
-                    let display = u.profile.and_then(|p| p.display_name).filter(|n| !n.is_empty());
-                    display.or(u.real_name)
+            resp.user
+                .map(|u| {
+                    let (display, title) = match u.profile {
+                        Some(p) => {
+                            let display = p.display_name.filter(|n| !n.is_empty());
+                            let title = p.title.filter(|t| !t.is_empty());
+                            (display, title)
+                        }
+                        None => (None, None),
+                    };
+                    let name = display
+                        .or(u.real_name)
+                        .unwrap_or_else(|| user_id.to_string());
+                    (name, title)
                 })
-                .unwrap_or_else(|| user_id.to_string());
-            format!("{} (@{})", name, user_id)
+                .unwrap_or_else(|| (user_id.to_string(), None))
         }
-        _ => format!("@{}", user_id),
+        _ => (user_id.to_string(), None),
     };
 
-    cache.insert(user_id.to_string(), display.clone());
-    display
+    cache.insert(user_id.to_string(), display_name.clone(), title);
+    display_name
 }
 
 /// Replace <@UXXXX> mentions in text with resolved display names
@@ -547,9 +580,21 @@ async fn handle_read_thread(params: &Value) -> Result<Vec<Value>> {
         }
     }
 
+    // Build participant legend from message authors (in order of first appearance)
+    let author_ids: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.user.clone())
+        .collect();
+    let legend = user_cache.participant_legend(&author_ids);
+
     // Format and return
     let display_map = user_cache.to_display_map();
-    Ok(format_thread_messages(&messages, &display_map, &image_data))
+    let mut blocks = Vec::new();
+    if !legend.is_empty() {
+        blocks.push(json!({"type": "text", "text": legend}));
+    }
+    blocks.extend(format_thread_messages(&messages, &display_map, &image_data));
+    Ok(blocks)
 }
 
 /// Handle MCP initialize request
@@ -787,19 +832,19 @@ mod tests {
     #[test]
     fn test_resolve_mentions() {
         let mut names = HashMap::new();
-        names.insert("U0123ABC".to_string(), "Alice (@U0123ABC)".to_string());
-        names.insert("U9876XYZ".to_string(), "Bob (@U9876XYZ)".to_string());
+        names.insert("U0123ABC".to_string(), "Alice".to_string());
+        names.insert("U9876XYZ".to_string(), "Bob".to_string());
 
         // Single mention
         assert_eq!(
             resolve_mentions("Hey <@U0123ABC>, check this", &names),
-            "Hey Alice (@U0123ABC), check this"
+            "Hey Alice, check this"
         );
 
         // Multiple mentions
         assert_eq!(
             resolve_mentions("<@U0123ABC> and <@U9876XYZ> please review", &names),
-            "Alice (@U0123ABC) and Bob (@U9876XYZ) please review"
+            "Alice and Bob please review"
         );
 
         // Unknown user falls back to @ID
@@ -824,8 +869,8 @@ mod tests {
     #[test]
     fn test_format_reactions_single() {
         let mut names = HashMap::new();
-        names.insert("U001".to_string(), "Alice (@U001)".to_string());
-        names.insert("U002".to_string(), "Bob (@U002)".to_string());
+        names.insert("U001".to_string(), "Alice".to_string());
+        names.insert("U002".to_string(), "Bob".to_string());
 
         let reactions = vec![SlackReaction {
             name: "+1".to_string(),
@@ -834,15 +879,15 @@ mod tests {
 
         assert_eq!(
             format_reactions(&reactions, &names),
-            "  :+1: Alice (@U001), Bob (@U002)"
+            "  :+1: Alice, Bob"
         );
     }
 
     #[test]
     fn test_format_reactions_multiple() {
         let mut names = HashMap::new();
-        names.insert("U001".to_string(), "Alice (@U001)".to_string());
-        names.insert("U002".to_string(), "Bob (@U002)".to_string());
+        names.insert("U001".to_string(), "Alice".to_string());
+        names.insert("U002".to_string(), "Bob".to_string());
 
         let reactions = vec![
             SlackReaction {
@@ -857,7 +902,7 @@ mod tests {
 
         assert_eq!(
             format_reactions(&reactions, &names),
-            "  :+1: Alice (@U001)  |  :eyes: Bob (@U002)"
+            "  :+1: Alice  |  :eyes: Bob"
         );
     }
 
@@ -887,13 +932,15 @@ mod tests {
 
         // Fresh entry
         cache.entries.insert("U001".to_string(), UserCacheEntry {
-            display: "Alice (@U001)".to_string(),
+            display_name: "Alice".to_string(),
+            title: Some("Director of Engineering".to_string()),
             cached_at: now,
         });
 
         // Expired entry (4 days old)
         cache.entries.insert("U002".to_string(), UserCacheEntry {
-            display: "Bob (@U002)".to_string(),
+            display_name: "Bob".to_string(),
+            title: None,
             cached_at: now - 4 * 24 * 3600,
         });
 
@@ -917,16 +964,71 @@ mod tests {
         };
 
         cache.entries.insert("U001".to_string(), UserCacheEntry {
-            display: "Alice (@U001)".to_string(),
+            display_name: "Alice".to_string(),
+            title: Some("Engineer".to_string()),
             cached_at: now,
         });
         cache.entries.insert("U002".to_string(), UserCacheEntry {
-            display: "Bob (@U002)".to_string(),
+            display_name: "Bob".to_string(),
+            title: None,
             cached_at: now - 4 * 24 * 3600,
         });
 
-        assert_eq!(cache.get("U001"), Some("Alice (@U001)"));
+        assert_eq!(cache.get("U001"), Some("Alice"));
         assert_eq!(cache.get("U002"), None);
         assert_eq!(cache.get("U999"), None);
+    }
+
+    #[test]
+    fn test_participant_legend() {
+        let now = chrono::Utc::now().timestamp();
+
+        let mut cache = UserCache {
+            entries: HashMap::new(),
+            path: PathBuf::from("/dev/null"),
+        };
+
+        cache.entries.insert("U001".to_string(), UserCacheEntry {
+            display_name: "Alice Smith".to_string(),
+            title: Some("Director of Engineering".to_string()),
+            cached_at: now,
+        });
+        cache.entries.insert("U002".to_string(), UserCacheEntry {
+            display_name: "Vivek Chandra".to_string(),
+            title: Some("Engineer".to_string()),
+            cached_at: now,
+        });
+        cache.entries.insert("U003".to_string(), UserCacheEntry {
+            display_name: "Charlie".to_string(),
+            title: None,
+            cached_at: now,
+        });
+
+        // Duplicates should be deduplicated, order preserved
+        let author_ids = vec![
+            "U001".to_string(),
+            "U002".to_string(),
+            "U001".to_string(),
+            "U003".to_string(),
+        ];
+        let legend = cache.participant_legend(&author_ids);
+
+        assert_eq!(
+            legend,
+            "Participants:\n\
+             - Alice Smith (@U001) — Director of Engineering\n\
+             - Vivek Chandra (@U002) — Engineer\n\
+             - Charlie (@U003)\n\
+             \n---\n\n"
+        );
+    }
+
+    #[test]
+    fn test_participant_legend_empty() {
+        let cache = UserCache {
+            entries: HashMap::new(),
+            path: PathBuf::from("/dev/null"),
+        };
+        assert_eq!(cache.participant_legend(&[]), "");
     }
 }
