@@ -56,6 +56,13 @@ struct SlackFile {
     size: Option<u64>,
 }
 
+/// Slack reaction (emoji + list of users who reacted)
+#[derive(Debug, Deserialize)]
+struct SlackReaction {
+    name: String,
+    users: Vec<String>,
+}
+
 /// Slack API message structure
 #[derive(Debug, Deserialize)]
 struct SlackMessage {
@@ -72,6 +79,8 @@ struct SlackMessage {
     bot_id: Option<String>,
     #[serde(default)]
     files: Vec<SlackFile>,
+    #[serde(default)]
+    reactions: Vec<SlackReaction>,
 }
 
 /// Slack API users.info response
@@ -335,6 +344,32 @@ async fn download_image(client: &Client, token: &str, file: &SlackFile) -> Optio
     Some((b64, mimetype.to_string()))
 }
 
+/// Format reactions for a message
+fn format_reactions(reactions: &[SlackReaction], user_names: &HashMap<String, String>) -> String {
+    if reactions.is_empty() {
+        return String::new();
+    }
+
+    let groups: Vec<String> = reactions
+        .iter()
+        .map(|r| {
+            let names: Vec<&str> = r
+                .users
+                .iter()
+                .map(|uid| {
+                    user_names
+                        .get(uid.as_str())
+                        .map(|s| s.as_str())
+                        .unwrap_or(uid.as_str())
+                })
+                .collect();
+            format!(":{}: {}", r.name, names.join(", "))
+        })
+        .collect();
+
+    format!("  {}", groups.join("  |  "))
+}
+
 /// Format thread messages for output
 fn format_thread_messages(
     messages: &[SlackMessage],
@@ -353,9 +388,17 @@ fn format_thread_messages(
         let text = resolve_mentions(raw_text, user_names);
         let timestamp = format_timestamp(&msg.ts);
 
+        let reactions = format_reactions(&msg.reactions, user_names);
+        let mut message_text = format!("[{}] {}\n{}", timestamp, user_display, text);
+        if !reactions.is_empty() {
+            message_text.push('\n');
+            message_text.push_str(&reactions);
+        }
+        message_text.push_str("\n\n");
+
         blocks.push(json!({
             "type": "text",
-            "text": format!("[{}] {}\n{}\n\n", timestamp, user_display, text)
+            "text": message_text
         }));
 
         if let Some(images) = image_data.get(&msg.ts) {
@@ -402,6 +445,11 @@ async fn handle_read_thread(params: &Value) -> Result<Vec<Value>> {
         if let Some(text) = &msg.text {
             for cap in mention_re.captures_iter(text) {
                 user_ids.push(cap[1].to_string());
+            }
+        }
+        for reaction in &msg.reactions {
+            for uid in &reaction.users {
+                user_ids.push(uid.clone());
             }
         }
     }
@@ -693,5 +741,63 @@ mod tests {
             resolve_mentions("plain text, no mentions", &names),
             "plain text, no mentions"
         );
+    }
+
+    #[test]
+    fn test_format_reactions_empty() {
+        let names = HashMap::new();
+        assert_eq!(format_reactions(&[], &names), "");
+    }
+
+    #[test]
+    fn test_format_reactions_single() {
+        let mut names = HashMap::new();
+        names.insert("U001".to_string(), "Alice (@U001)".to_string());
+        names.insert("U002".to_string(), "Bob (@U002)".to_string());
+
+        let reactions = vec![SlackReaction {
+            name: "+1".to_string(),
+            users: vec!["U001".to_string(), "U002".to_string()],
+        }];
+
+        assert_eq!(
+            format_reactions(&reactions, &names),
+            "  :+1: Alice (@U001), Bob (@U002)"
+        );
+    }
+
+    #[test]
+    fn test_format_reactions_multiple() {
+        let mut names = HashMap::new();
+        names.insert("U001".to_string(), "Alice (@U001)".to_string());
+        names.insert("U002".to_string(), "Bob (@U002)".to_string());
+
+        let reactions = vec![
+            SlackReaction {
+                name: "+1".to_string(),
+                users: vec!["U001".to_string()],
+            },
+            SlackReaction {
+                name: "eyes".to_string(),
+                users: vec!["U002".to_string()],
+            },
+        ];
+
+        assert_eq!(
+            format_reactions(&reactions, &names),
+            "  :+1: Alice (@U001)  |  :eyes: Bob (@U002)"
+        );
+    }
+
+    #[test]
+    fn test_format_reactions_unknown_user() {
+        let names = HashMap::new();
+
+        let reactions = vec![SlackReaction {
+            name: "rocket".to_string(),
+            users: vec!["U999".to_string()],
+        }];
+
+        assert_eq!(format_reactions(&reactions, &names), "  :rocket: U999");
     }
 }
