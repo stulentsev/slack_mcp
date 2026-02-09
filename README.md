@@ -81,33 +81,45 @@ The binary will be installed to `~/.cargo/bin/slack_mcp` (macOS/Linux) or `%USER
 
 ### Step 3: Get Your Slack Token
 
+This integration uses a shared company Slack bot token (not a personal token). To get it:
+
 1. Open your company's **Keeper Vault**
 2. Search for "Slack - MCP Server (Readonly)"
 3. Copy the token (it should start with `xoxb-`)
 
+This is a shared, read-only bot token provisioned specifically for this MCP integration. Do not create your own Slack app — use this one.
+
 ### Step 4: Create Configuration File
 
-Create a configuration file in your home directory:
+Create the configuration file:
 
 **macOS/Linux:**
 ```bash
+# Create the config directory
+mkdir -p ~/.config/slackmcp
+
 # Create the config file
-cat > ~/.slackmcp.config << EOF
+cat > ~/.config/slackmcp/config << EOF
 SLACK_TOKEN=xoxb-your-token-from-keeper-vault
 EOF
 
 # Secure the file (restrict access to your user only)
-chmod 600 ~/.slackmcp.config
+chmod 600 ~/.config/slackmcp/config
 ```
 
 **Windows:**
 ```powershell
+# Create the config directory
+New-Item -ItemType Directory -Force -Path $env:USERPROFILE\.config\slackmcp
+
 # Create the config file
 $token = "xoxb-your-token-from-keeper-vault"
-"SLACK_TOKEN=$token" | Out-File -FilePath $env:USERPROFILE\.slackmcp.config -Encoding utf8 -NoNewline
+"SLACK_TOKEN=$token" | Out-File -FilePath $env:USERPROFILE\.config\slackmcp\config -Encoding utf8 -NoNewline
 ```
 
 **Important**: Replace `xoxb-your-token-from-keeper-vault` with the actual token you copied from Keeper.
+
+The config path follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/). You can override it by setting `$XDG_CONFIG_HOME`. The legacy path `~/.slackmcp.config` is still supported as a fallback.
 
 ### Step 5: Configure Cursor
 
@@ -155,11 +167,11 @@ what was the final decision on the deployment schedule?
 
 ### "Token not found" Error
 
-**Solution**: Ensure your `~/.slackmcp.config` file exists and contains the correct token. Verify the file path and permissions:
+**Solution**: Ensure your config file exists and contains the correct token. Verify the file path and permissions:
 
 ```bash
-ls -la ~/.slackmcp.config
-cat ~/.slackmcp.config
+ls -la ~/.config/slackmcp/config
+cat ~/.config/slackmcp/config
 ```
 
 ### "Channel not found" Error
@@ -226,8 +238,8 @@ If the binary doesn't exist at that path, update your Cursor MCP configuration w
 
 ## Security
 
-**Important**: 
-- Your `~/.slackmcp.config` file contains sensitive credentials. Keep it secure and never share it.
+**Important**:
+- Your `~/.config/slackmcp/config` file contains a shared company credential. Keep it secure and never share it outside the organization.
 - The file permissions (`chmod 600`) ensure only you can read it.
 - Never commit this file to version control.
 
