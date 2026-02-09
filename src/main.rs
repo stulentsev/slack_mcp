@@ -89,7 +89,6 @@ struct SlackMessage {
 struct UsersInfoResponse {
     ok: bool,
     user: Option<UserInfo>,
-    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -381,14 +380,14 @@ async fn download_image(client: &Client, token: &str, file: &SlackFile) -> Optio
         return None;
     }
 
-    if let Some(size) = file.size {
-        if size > MAX_IMAGE_SIZE {
-            eprintln!(
-                "Skipping file {:?}: size {} exceeds 5MB limit",
-                file.name, size
-            );
-            return None;
-        }
+    if let Some(size) = file.size
+        && size > MAX_IMAGE_SIZE
+    {
+        eprintln!(
+            "Skipping file {:?}: size {} exceeds 5MB limit",
+            file.name, size
+        );
+        return None;
     }
 
     let url = file.url_private.as_deref()?;
@@ -748,12 +747,12 @@ async fn main() -> Result<()> {
 
         // Only send response if it has a valid (non-null) ID
         // Cursor 2.0.69+ rejects responses with id: null, and JSON-RPC 2.0 says notifications shouldn't get responses
-        if let Some(id) = &response.id {
-            if !id.is_null() {
-                let response_json = serde_json::to_string(&response)?;
-                writeln!(stdout, "{}", response_json)?;
-                stdout.flush()?;
-            }
+        if let Some(id) = &response.id
+            && !id.is_null()
+        {
+            let response_json = serde_json::to_string(&response)?;
+            writeln!(stdout, "{}", response_json)?;
+            stdout.flush()?;
         }
     }
 
