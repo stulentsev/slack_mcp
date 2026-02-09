@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -115,6 +116,76 @@ struct ConversationsRepliesResponse {
 #[derive(Debug, Deserialize)]
 struct ResponseMetadata {
     next_cursor: Option<String>,
+}
+
+const USER_CACHE_TTL: i64 = 3 * 24 * 3600; // 3 days in seconds
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UserCacheEntry {
+    display: String,
+    cached_at: i64,
+}
+
+/// Persistent user name cache backed by ~/.slackmcp.usercache
+struct UserCache {
+    entries: HashMap<String, UserCacheEntry>,
+    path: PathBuf,
+}
+
+impl UserCache {
+    fn load() -> Self {
+        let path = Self::cache_path();
+        let entries = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { entries, path }
+    }
+
+    fn cache_path() -> PathBuf {
+        let home = env::var("HOME")
+            .or_else(|_| env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".slackmcp.usercache")
+    }
+
+    fn get(&self, user_id: &str) -> Option<&str> {
+        let entry = self.entries.get(user_id)?;
+        let now = chrono::Utc::now().timestamp();
+        if now - entry.cached_at < USER_CACHE_TTL {
+            Some(&entry.display)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, user_id: String, display: String) {
+        let now = chrono::Utc::now().timestamp();
+        self.entries.insert(user_id, UserCacheEntry {
+            display,
+            cached_at: now,
+        });
+    }
+
+    fn save(&self) {
+        let now = chrono::Utc::now().timestamp();
+        let fresh: HashMap<&String, &UserCacheEntry> = self
+            .entries
+            .iter()
+            .filter(|(_, v)| now - v.cached_at < USER_CACHE_TTL)
+            .collect();
+        if let Ok(json) = serde_json::to_string(&fresh) {
+            let _ = fs::write(&self.path, json);
+        }
+    }
+
+    /// Return a simple HashMap<String, String> for use by formatting functions
+    fn to_display_map(&self) -> HashMap<String, String> {
+        self.entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.display.clone()))
+            .collect()
+    }
 }
 
 /// Parse Slack thread URL to extract channel ID and thread timestamp
@@ -245,15 +316,15 @@ fn format_timestamp(ts: &str) -> String {
     ts.to_string()
 }
 
-/// Resolve a user ID to a display name via Slack API, with caching
+/// Resolve a user ID to a display name via Slack API, with persistent caching
 async fn resolve_user_name(
     client: &Client,
     token: &str,
     user_id: &str,
-    cache: &mut HashMap<String, String>,
+    cache: &mut UserCache,
 ) -> String {
     if let Some(name) = cache.get(user_id) {
-        return name.clone();
+        return name.to_string();
     }
 
     let url = format!("https://slack.com/api/users.info?user={}", user_id);
@@ -454,14 +525,15 @@ async fn handle_read_thread(params: &Value) -> Result<Vec<Value>> {
         }
     }
 
-    // Resolve all unique user IDs
+    // Resolve all unique user IDs (persistent cache across invocations)
     let client = Client::new();
-    let mut user_cache: HashMap<String, String> = HashMap::new();
+    let mut user_cache = UserCache::load();
     for user_id in &user_ids {
-        if !user_cache.contains_key(user_id.as_str()) {
+        if user_cache.get(user_id).is_none() {
             resolve_user_name(&client, &token, user_id, &mut user_cache).await;
         }
     }
+    user_cache.save();
 
     // Download image attachments
     let mut image_data: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -477,7 +549,8 @@ async fn handle_read_thread(params: &Value) -> Result<Vec<Value>> {
     }
 
     // Format and return
-    Ok(format_thread_messages(&messages, &user_cache, &image_data))
+    let display_map = user_cache.to_display_map();
+    Ok(format_thread_messages(&messages, &display_map, &image_data))
 }
 
 /// Handle MCP initialize request
@@ -799,5 +872,62 @@ mod tests {
         }];
 
         assert_eq!(format_reactions(&reactions, &names), "  :rocket: U999");
+    }
+
+    #[test]
+    fn test_user_cache_save_evicts_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("usercache");
+
+        let now = chrono::Utc::now().timestamp();
+
+        let mut cache = UserCache {
+            entries: HashMap::new(),
+            path: cache_path.clone(),
+        };
+
+        // Fresh entry
+        cache.entries.insert("U001".to_string(), UserCacheEntry {
+            display: "Alice (@U001)".to_string(),
+            cached_at: now,
+        });
+
+        // Expired entry (4 days old)
+        cache.entries.insert("U002".to_string(), UserCacheEntry {
+            display: "Bob (@U002)".to_string(),
+            cached_at: now - 4 * 24 * 3600,
+        });
+
+        cache.save();
+
+        // Reload and verify only fresh entry survived
+        let saved: HashMap<String, UserCacheEntry> =
+            serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+
+        assert!(saved.contains_key("U001"));
+        assert!(!saved.contains_key("U002"));
+    }
+
+    #[test]
+    fn test_user_cache_get_respects_ttl() {
+        let now = chrono::Utc::now().timestamp();
+
+        let mut cache = UserCache {
+            entries: HashMap::new(),
+            path: PathBuf::from("/dev/null"),
+        };
+
+        cache.entries.insert("U001".to_string(), UserCacheEntry {
+            display: "Alice (@U001)".to_string(),
+            cached_at: now,
+        });
+        cache.entries.insert("U002".to_string(), UserCacheEntry {
+            display: "Bob (@U002)".to_string(),
+            cached_at: now - 4 * 24 * 3600,
+        });
+
+        assert_eq!(cache.get("U001"), Some("Alice (@U001)"));
+        assert_eq!(cache.get("U002"), None);
+        assert_eq!(cache.get("U999"), None);
     }
 }
