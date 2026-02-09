@@ -119,12 +119,19 @@ struct ResponseMetadata {
 }
 
 const USER_CACHE_TTL: i64 = 3 * 24 * 3600; // 3 days in seconds
+const USER_CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UserCacheEntry {
     display_name: String,
     title: Option<String>,
     cached_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UserCacheFile {
+    version: u32,
+    entries: HashMap<String, UserCacheEntry>,
 }
 
 /// Persistent user name cache backed by ~/.slackmcp.usercache
@@ -138,7 +145,9 @@ impl UserCache {
         let path = Self::cache_path();
         let entries = fs::read_to_string(&path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| serde_json::from_str::<UserCacheFile>(&s).ok())
+            .filter(|f| f.version == USER_CACHE_VERSION)
+            .map(|f| f.entries)
             .unwrap_or_default();
         Self { entries, path }
     }
@@ -176,7 +185,15 @@ impl UserCache {
             .iter()
             .filter(|(_, v)| now - v.cached_at < USER_CACHE_TTL)
             .collect();
-        if let Ok(json) = serde_json::to_string(&fresh) {
+        let file = UserCacheFile {
+            version: USER_CACHE_VERSION,
+            entries: fresh.into_iter().map(|(k, v)| (k.clone(), UserCacheEntry {
+                display_name: v.display_name.clone(),
+                title: v.title.clone(),
+                cached_at: v.cached_at,
+            })).collect(),
+        };
+        if let Ok(json) = serde_json::to_string(&file) {
             let _ = fs::write(&self.path, json);
         }
     }
@@ -947,11 +964,12 @@ mod tests {
         cache.save();
 
         // Reload and verify only fresh entry survived
-        let saved: HashMap<String, UserCacheEntry> =
+        let saved: UserCacheFile =
             serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
 
-        assert!(saved.contains_key("U001"));
-        assert!(!saved.contains_key("U002"));
+        assert_eq!(saved.version, USER_CACHE_VERSION);
+        assert!(saved.entries.contains_key("U001"));
+        assert!(!saved.entries.contains_key("U002"));
     }
 
     #[test]
